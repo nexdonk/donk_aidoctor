@@ -2,6 +2,10 @@ Framework = {}
 Framework.Type = nil
 Framework.Object = nil
 
+-- Client-side variables
+local PlayerLoaded = false
+local PlayerData = {}
+
 -- Detect and initialize framework
 function Framework.Init()
     -- Try QBCore first
@@ -44,37 +48,7 @@ function Framework.Init()
 end
 
 -- Client-side functions
-if IsDuplicityVersion() == 0 then
-
-    -- Wait for player data to be ready
-    local PlayerLoaded = false
-    local PlayerData = {}
-
-    -- ESX Player Loaded Event
-    RegisterNetEvent('esx:playerLoaded', function(xPlayer)
-        PlayerData = xPlayer
-        PlayerLoaded = true
-    end)
-
-    -- ESX Set Job Event
-    RegisterNetEvent('esx:setJob', function(job)
-        if PlayerData then
-            PlayerData.job = job
-        end
-    end)
-
-    -- QBCore Player Loaded Event
-    RegisterNetEvent('QBCore:Client:OnPlayerLoaded', function()
-        PlayerLoaded = true
-        if Framework.Type == 'qbcore' and Framework.Object then
-            PlayerData = Framework.Object.Functions.GetPlayerData()
-        end
-    end)
-
-    -- QBCore Player Data Update
-    RegisterNetEvent('QBCore:Player:SetPlayerData', function(data)
-        PlayerData = data
-    end)
+if not IsDuplicityVersion() then
 
     -- Get player data
     function Framework.GetPlayerData()
@@ -102,6 +76,7 @@ if IsDuplicityVersion() == 0 then
     -- Check if player is dead
     function Framework.IsPlayerDead()
         if not Framework.Type or not Framework.Object then
+            print('[donk_aidoctor] ERROR: Framework.IsPlayerDead - Framework not initialized')
             return false
         end
 
@@ -125,6 +100,11 @@ if IsDuplicityVersion() == 0 then
 
     -- Trigger server callback
     function Framework.TriggerCallback(name, cb, ...)
+        if not Framework.Object then
+            print('[donk_aidoctor] ERROR: Framework.TriggerCallback - Framework not initialized')
+            return
+        end
+
         if Framework.Type == 'qbcore' then
             Framework.Object.Functions.TriggerCallback(name, cb, ...)
         elseif Framework.Type == 'esx' then
@@ -148,9 +128,9 @@ if IsDuplicityVersion() == 0 then
         end
 
         -- Fallback to framework notifications
-        if Framework.Type == 'qbcore' then
+        if Framework.Type == 'qbcore' and Framework.Object then
             Framework.Object.Functions.Notify(message, type, duration)
-        elseif Framework.Type == 'esx' then
+        elseif Framework.Type == 'esx' and Framework.Object then
             Framework.Object.ShowNotification(message)
         else
             -- Final fallback to basic notification
@@ -188,7 +168,7 @@ if IsDuplicityVersion() == 0 then
         end
 
         -- Fallback to framework progress
-        if Framework.Type == 'qbcore' then
+        if Framework.Type == 'qbcore' and Framework.Object then
             Framework.Object.Functions.Progressbar(
                 options.name or "progress",
                 label,
@@ -219,10 +199,46 @@ if IsDuplicityVersion() == 0 then
             end)
         end
     end
+
+    -- Setup player loaded events
+    Citizen.CreateThread(function()
+        -- Wait for framework to initialize
+        while not Framework.Object do
+            Citizen.Wait(100)
+        end
+
+        -- ESX Player Loaded Event
+        if Framework.Type == 'esx' then
+            RegisterNetEvent('esx:playerLoaded', function(xPlayer)
+                PlayerData = xPlayer
+                PlayerLoaded = true
+                print('[donk_aidoctor] ESX Player loaded')
+            end)
+
+            RegisterNetEvent('esx:setJob', function(job)
+                if PlayerData then
+                    PlayerData.job = job
+                end
+            end)
+        end
+
+        -- QBCore Player Loaded Event
+        if Framework.Type == 'qbcore' then
+            RegisterNetEvent('QBCore:Client:OnPlayerLoaded', function()
+                PlayerLoaded = true
+                PlayerData = Framework.Object.Functions.GetPlayerData()
+                print('[donk_aidoctor] QBCore Player loaded')
+            end)
+
+            RegisterNetEvent('QBCore:Player:SetPlayerData', function(data)
+                PlayerData = data
+            end)
+        end
+    end)
 end
 
 -- Server-side functions
-if IsDuplicityVersion() == 1 then
+if IsDuplicityVersion() then
 
     -- Get player object
     function Framework.GetPlayer(source)
