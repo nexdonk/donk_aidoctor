@@ -1,5 +1,7 @@
 # donk_aidoctor v2.0
 
+![AI Doctor Banner](https://r2.fivemanage.com/FRw2ddkmLRukwaZQAXbys/aidoctor.png)
+
 An AI-powered emergency medical service script for FiveM that supports both **QBCore** and **ESX** frameworks with optional **ox_lib** integration for enhanced UI/UX.
 
 ## Features
