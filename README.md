@@ -189,7 +189,14 @@ Config.CustomReviveEvent = 'myserver:revivePlayer'
 - Verify there aren't too many EMS online (check Config.MinEMS)
 - Ensure you have enough money
 - Check if you're on cooldown
-- Enable debug mode to see detailed logs
+- Enable debug mode (`Config.Debug = true`) to see detailed logs in F8 console
+
+### Doctor spawns but doesn't approach/treat player
+- Check F8 console with debug mode enabled to see distance calculations
+- Verify the doctor is exiting the vehicle (look for "Doctor exiting vehicle" in console)
+- Increase `Config.TreatmentDistance` if doctor never gets close enough (try 3.0)
+- Ensure there are no obstacles blocking the doctor's path
+- The doctor must be within `Config.ApproachDistance` to exit vehicle and approach
 
 ### Framework not detected
 - Ensure your framework is started before this resource
@@ -208,7 +215,16 @@ Config.CustomReviveEvent = 'myserver:revivePlayer'
 
 ## Changelog
 
-### Version 2.0.0 (Current)
+### Version 2.0.1 (Current)
+- **FIXED**: Removed problematic character loaded check that prevented dead players from calling doctor
+- **FIXED**: Improved doctor exit vehicle and approach logic
+- **FIXED**: Added proper state tracking for doctor exiting vehicle
+- **IMPROVED**: Enhanced proximity detection and treatment distance checks
+- **IMPROVED**: Better debug logging for distance tracking
+- **CHANGED**: Increased default approach distance to 15.0 for more reliable detection
+- **CHANGED**: Treatment distance now properly configurable (default: 1.0)
+
+### Version 2.0.0
 - Complete rewrite with multi-framework support
 - Added ESX framework support
 - Integrated ox_lib for better UI/UX
