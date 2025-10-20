@@ -1,4 +1,3 @@
--- Initialize framework with retry logic
 Citizen.CreateThread(function()
     local maxRetries = 10
     local retries = 0
@@ -18,21 +17,18 @@ Citizen.CreateThread(function()
     end
 end)
 
--- State variables
 local Active = false
 local DoctorVehicle = nil
 local DoctorPed = nil
 local DoctorBlip = nil
 local ProcessingCall = false
 
--- Debug print helper
 local function DebugPrint(...)
     if Config.Debug then
         print('[donk_aidoctor]', ...)
     end
 end
 
--- Helper function to format time
 local function FormatTime(seconds)
     local minutes = math.floor(seconds / 60)
     local secs = seconds % 60
@@ -43,21 +39,17 @@ local function FormatTime(seconds)
     end
 end
 
--- Register command to call AI doctor
 RegisterCommand(Config.Command, function(source, args, raw)
-    -- Check if framework is initialized
     if not Framework or not Framework.Type or not Framework.Object then
         print('[donk_aidoctor] Framework not initialized yet!')
         return
     end
 
-    -- Prevent spam
     if ProcessingCall then
         Framework.Notify(Config.Locale['doctor_called'], 'info')
         return
     end
 
-    -- Check if player is dead
     if not Framework.IsPlayerDead() then
         Framework.Notify(Config.Locale['not_dead'], 'error')
         return
@@ -66,16 +58,13 @@ RegisterCommand(Config.Command, function(source, args, raw)
     ProcessingCall = true
     DebugPrint('Player calling AI doctor...')
 
-    -- Check with server if doctor is available
     Framework.TriggerCallback('donk_aidoctor:docOnline', function(canCall, hasEnoughMoney, reason, extraData)
         if canCall and hasEnoughMoney and reason == 'success' then
-            -- All checks passed - spawn doctor
             DebugPrint('All checks passed - spawning doctor')
             SpawnDoctor(GetEntityCoords(PlayerPedId()))
             TriggerServerEvent('donk_aidoctor:charge')
             Framework.Notify(Config.Locale['doctor_called'], 'success')
         else
-            -- Handle different failure reasons
             if reason == 'cooldown' then
                 local timeLeft = extraData or 0
                 local message = string.format(Config.Locale['on_cooldown'], FormatTime(timeLeft))
@@ -93,25 +82,21 @@ RegisterCommand(Config.Command, function(source, args, raw)
     end)
 end)
 
--- Spawn doctor vehicle and NPC
 function SpawnDoctor(playerPos)
     DebugPrint('Spawning doctor vehicle and NPC...')
 
-    -- Request vehicle model
     local vehicleHash = GetHashKey(Config.VehicleModel)
     RequestModel(vehicleHash)
     while not HasModelLoaded(vehicleHash) do
         Wait(10)
     end
 
-    -- Request ped model
     local pedHash = GetHashKey(Config.DoctorPed)
     RequestModel(pedHash)
     while not HasModelLoaded(pedHash) do
         Wait(10)
     end
 
-    -- Find spawn position
     local spawnRadius = Config.SpawnDistance
     local found, spawnPos, spawnHeading = GetClosestVehicleNodeWithHeading(
         playerPos.x + math.random(-spawnRadius, spawnRadius),
@@ -121,7 +106,7 @@ function SpawnDoctor(playerPos)
     )
 
     if not found then
-        DebugPrint('Warning: Could not find vehicle node, using random position')
+        DebugPrint('Could not find vehicle node, using random position')
         spawnPos = vector3(
             playerPos.x + math.random(-spawnRadius, spawnRadius),
             playerPos.y + math.random(-spawnRadius, spawnRadius),
@@ -130,7 +115,6 @@ function SpawnDoctor(playerPos)
         spawnHeading = math.random(0, 359)
     end
 
-    -- Ensure vehicle doesn't already exist (cleanup old one if it does)
     if DoctorVehicle and DoesEntityExist(DoctorVehicle) then
         DeleteEntity(DoctorVehicle)
     end
@@ -138,7 +122,6 @@ function SpawnDoctor(playerPos)
         DeleteEntity(DoctorPed)
     end
 
-    -- Create vehicle
     DoctorVehicle = CreateVehicle(vehicleHash, spawnPos.x, spawnPos.y, spawnPos.z + Config.SpawnOffset, spawnHeading, true, false)
     ClearAreaOfVehicles(GetEntityCoords(DoctorVehicle), 5.0, false, false, false, false, false)
     SetVehicleOnGroundProperly(DoctorVehicle)
@@ -148,7 +131,6 @@ function SpawnDoctor(playerPos)
 
     DebugPrint('Doctor vehicle spawned at', spawnPos)
 
-    -- Create doctor NPC in vehicle
     DoctorPed = CreatePedInsideVehicle(DoctorVehicle, 26, pedHash, -1, true, false)
     SetEntityAsMissionEntity(DoctorPed, true, true)
     SetBlockingOfNonTemporaryEvents(DoctorPed, true)
@@ -156,7 +138,6 @@ function SpawnDoctor(playerPos)
 
     DebugPrint('Doctor NPC created')
 
-    -- Create blip if configured
     if Config.ShowBlip then
         DoctorBlip = AddBlipForEntity(DoctorVehicle)
         SetBlipSprite(DoctorBlip, Config.BlipSprite)
@@ -169,15 +150,12 @@ function SpawnDoctor(playerPos)
         EndTextCommandSetBlipName(DoctorBlip)
     end
 
-    -- Play arrival sound if configured
     if Config.PlayArrivalSound then
         PlaySoundFrontend(-1, Config.ArrivalSound.name, Config.ArrivalSound.set, 1)
     end
 
-    -- Wait a moment before driving
     Wait(2000)
 
-    -- Task doctor to drive to player
     TaskVehicleDriveToCoord(
         DoctorPed,
         DoctorVehicle,
@@ -193,12 +171,10 @@ function SpawnDoctor(playerPos)
 
     DebugPrint('Doctor driving to player location')
 
-    -- Set active state
     Active = true
     ProcessingCall = false
 end
 
--- Main thread to monitor doctor proximity
 Citizen.CreateThread(function()
     local hasExitedVehicle = false
 
@@ -223,30 +199,26 @@ Citizen.CreateThread(function()
                     print(string.format('[donk_aidoctor] Dist to vehicle: %.2f | Dist to ped: %.2f', distToVehicle, distToPed))
                 end
 
-                -- Check if close enough for treatment first
                 if distToPed <= Config.TreatmentDistance then
                     DebugPrint('Doctor close enough - starting treatment')
                     Active = false
                     hasExitedVehicle = false
                     ClearPedTasksImmediately(DoctorPed)
                     StartTreatment()
-                -- When vehicle is within approach distance, make doctor exit and walk to player
                 elseif distToVehicle <= Config.ApproachDistance then
                     if not hasExitedVehicle then
                         DebugPrint('Doctor within approach distance')
 
-                        -- Make doctor exit vehicle if still inside
                         if IsPedInVehicle(DoctorPed, DoctorVehicle, false) then
                             TaskLeaveVehicle(DoctorPed, DoctorVehicle, 0)
                             DebugPrint('Doctor exiting vehicle')
                             hasExitedVehicle = true
-                            Citizen.Wait(3000) -- Wait for doctor to exit
+                            Citizen.Wait(3000)
                         else
                             hasExitedVehicle = true
                         end
                     end
 
-                    -- Walk to player
                     if hasExitedVehicle then
                         TaskGoToCoordAnyMeans(
                             DoctorPed,
@@ -266,18 +238,15 @@ Citizen.CreateThread(function()
     end
 end)
 
--- Start treatment sequence
 function StartTreatment()
     DebugPrint('Starting treatment sequence')
 
-    -- Load animation dictionary
     local animDict = Config.DoctorAnimation.dict
     RequestAnimDict(animDict)
     while not HasAnimDictLoaded(animDict) do
         Citizen.Wait(100)
     end
 
-    -- Play CPR animation on doctor
     TaskPlayAnim(
         DoctorPed,
         animDict,
@@ -285,7 +254,6 @@ function StartTreatment()
         1.0, 1.0, -1, 9, 1.0, 0, 0, 0
     )
 
-    -- Show progress bar
     Framework.ShowProgress(
         Config.Locale['treatment_progress'],
         Config.ReviveTime,
@@ -303,24 +271,18 @@ function StartTreatment()
             if completed then
                 DebugPrint('Treatment completed')
 
-                -- Clear doctor animation
                 ClearPedTasks(DoctorPed)
                 Wait(500)
 
-                -- Trigger revive on server
                 TriggerServerEvent("donk_aidoctor:revivePlayer")
 
-                -- Stop death effects
                 StopScreenEffect('DeathFailOut')
 
-                -- Notify player
                 local message = string.format("%s ($%s)", Config.Locale['treatment_complete'], Config.Price)
                 Framework.Notify(message, 'success')
 
-                -- Cleanup
                 CleanupDoctor()
 
-                -- Reset spam protection after delay
                 Wait(5000)
                 ProcessingCall = false
             else
@@ -332,24 +294,20 @@ function StartTreatment()
     )
 end
 
--- Cleanup doctor entities
 function CleanupDoctor()
     DebugPrint('Cleaning up doctor entities')
 
-    -- Remove blip
     if DoctorBlip and DoesBlipExist(DoctorBlip) then
         RemoveBlip(DoctorBlip)
         DoctorBlip = nil
     end
 
-    -- Delete ped gracefully
     if DoctorPed and DoesEntityExist(DoctorPed) then
         SetEntityAsNoLongerNeeded(DoctorPed)
         DeleteEntity(DoctorPed)
         DoctorPed = nil
     end
 
-    -- Delete vehicle
     if DoctorVehicle and DoesEntityExist(DoctorVehicle) then
         SetEntityAsNoLongerNeeded(DoctorVehicle)
         DeleteEntity(DoctorVehicle)
@@ -359,7 +317,6 @@ function CleanupDoctor()
     Active = false
 end
 
--- Cleanup on resource stop
 AddEventHandler('onResourceStop', function(resourceName)
     if GetCurrentResourceName() == resourceName then
         CleanupDoctor()
