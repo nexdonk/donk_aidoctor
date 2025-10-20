@@ -31,7 +31,7 @@ Config.DoctorSpeed = 20.0 -- Driving speed for doctor (in m/s)
 Config.DoctorDrivingStyle = 786603 -- Driving style flags (786603 = normal, cautious)
 
 -- Proximity Settings
-Config.ApproachDistance = 10.0 -- Distance at which doctor starts walking to player
+Config.ApproachDistance = 15.0 -- Distance at which doctor starts walking to player
 Config.TreatmentDistance = 1.0 -- Distance at which treatment begins
 
 -- Treatment Settings
@@ -65,7 +65,7 @@ Config.UseOxLib = true -- Try to use ox_lib for notifications/progress (falls ba
 Config.Cooldown = 300 -- Cooldown in seconds between AI doctor calls (300 = 5 minutes)
 
 -- Debug Settings
-Config.Debug = false -- Enable debug prints
+Config.Debug = true -- Enable debug prints
 
 -- Locale/Messages
 Config.Locale = {

@@ -200,14 +200,17 @@ end
 
 -- Main thread to monitor doctor proximity
 Citizen.CreateThread(function()
+    local hasExitedVehicle = false
+
     while true do
-        Citizen.Wait(200)
+        Citizen.Wait(500)
 
         if Active and DoctorVehicle and DoctorPed then
             if not DoesEntityExist(DoctorVehicle) or not DoesEntityExist(DoctorPed) then
                 DebugPrint('Doctor entities no longer exist - resetting state')
                 CleanupDoctor()
                 Active = false
+                hasExitedVehicle = false
             else
                 local playerPos = GetEntityCoords(PlayerPedId())
                 local vehiclePos = GetEntityCoords(DoctorVehicle)
@@ -216,39 +219,49 @@ Citizen.CreateThread(function()
                 local distToVehicle = #(playerPos - vehiclePos)
                 local distToPed = #(playerPos - pedPos)
 
-                DebugPrint('Distance to vehicle:', distToVehicle, '| Distance to ped:', distToPed)
+                if Config.Debug then
+                    print(string.format('[donk_aidoctor] Dist to vehicle: %.2f | Dist to ped: %.2f', distToVehicle, distToPed))
+                end
 
+                -- Check if close enough for treatment first
+                if distToPed <= Config.TreatmentDistance then
+                    DebugPrint('Doctor close enough - starting treatment')
+                    Active = false
+                    hasExitedVehicle = false
+                    ClearPedTasksImmediately(DoctorPed)
+                    StartTreatment()
                 -- When vehicle is within approach distance, make doctor exit and walk to player
-                if distToVehicle <= Config.ApproachDistance then
-                    DebugPrint('Doctor within approach distance - exiting vehicle')
+                elseif distToVehicle <= Config.ApproachDistance then
+                    if not hasExitedVehicle then
+                        DebugPrint('Doctor within approach distance')
 
-                    -- Make doctor exit vehicle if still inside
-                    if IsPedInVehicle(DoctorPed, DoctorVehicle, false) then
-                        TaskLeaveVehicle(DoctorPed, DoctorVehicle, 0)
-                        DebugPrint('Doctor exiting vehicle')
-                        Citizen.Wait(3000) -- Wait for doctor to exit
+                        -- Make doctor exit vehicle if still inside
+                        if IsPedInVehicle(DoctorPed, DoctorVehicle, false) then
+                            TaskLeaveVehicle(DoctorPed, DoctorVehicle, 0)
+                            DebugPrint('Doctor exiting vehicle')
+                            hasExitedVehicle = true
+                            Citizen.Wait(3000) -- Wait for doctor to exit
+                        else
+                            hasExitedVehicle = true
+                        end
                     end
 
                     -- Walk to player
-                    TaskGoToCoordAnyMeans(
-                        DoctorPed,
-                        playerPos.x,
-                        playerPos.y,
-                        playerPos.z,
-                        1.0, 0, 0,
-                        786603,
-                        0xbf800000
-                    )
-
-                    -- When doctor is close enough, start treatment
-                    if distToPed <= Config.TreatmentDistance then
-                        DebugPrint('Doctor close enough - starting treatment')
-                        Active = false
-                        ClearPedTasksImmediately(DoctorPed)
-                        StartTreatment()
+                    if hasExitedVehicle then
+                        TaskGoToCoordAnyMeans(
+                            DoctorPed,
+                            playerPos.x,
+                            playerPos.y,
+                            playerPos.z,
+                            1.0, 0, 0,
+                            786603,
+                            0xbf800000
+                        )
                     end
                 end
             end
+        else
+            hasExitedVehicle = false
         end
     end
 end)
