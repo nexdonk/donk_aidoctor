@@ -51,16 +51,6 @@ RegisterCommand(Config.Command, function(source, args, raw)
         return
     end
 
-    -- Check if player is loaded
-    if Framework.IsPlayerLoaded and not Framework.IsPlayerLoaded() then
-        lib.notify({
-            title = 'AI Doctor',
-            description = 'Please wait for your character to load',
-            type = 'error'
-        })
-        return
-    end
-
     -- Prevent spam
     if ProcessingCall then
         Framework.Notify(Config.Locale['doctor_called'], 'info')
@@ -226,20 +216,33 @@ Citizen.CreateThread(function()
                 local distToVehicle = #(playerPos - vehiclePos)
                 local distToPed = #(playerPos - pedPos)
 
-                -- When vehicle is within approach distance, make doctor walk to player
+                DebugPrint('Distance to vehicle:', distToVehicle, '| Distance to ped:', distToPed)
+
+                -- When vehicle is within approach distance, make doctor exit and walk to player
                 if distToVehicle <= Config.ApproachDistance then
+                    DebugPrint('Doctor within approach distance - exiting vehicle')
+
+                    -- Make doctor exit vehicle if still inside
+                    if IsPedInVehicle(DoctorPed, DoctorVehicle, false) then
+                        TaskLeaveVehicle(DoctorPed, DoctorVehicle, 0)
+                        DebugPrint('Doctor exiting vehicle')
+                        Citizen.Wait(3000) -- Wait for doctor to exit
+                    end
+
+                    -- Walk to player
                     TaskGoToCoordAnyMeans(
                         DoctorPed,
                         playerPos.x,
                         playerPos.y,
                         playerPos.z,
                         1.0, 0, 0,
-                        Config.DoctorDrivingStyle,
+                        786603,
                         0xbf800000
                     )
 
                     -- When doctor is close enough, start treatment
                     if distToPed <= Config.TreatmentDistance then
+                        DebugPrint('Doctor close enough - starting treatment')
                         Active = false
                         ClearPedTasksImmediately(DoctorPed)
                         StartTreatment()
