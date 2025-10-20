@@ -46,24 +46,79 @@ end
 -- Client-side functions
 if IsDuplicityVersion() == 0 then
 
+    -- Wait for player data to be ready
+    local PlayerLoaded = false
+    local PlayerData = {}
+
+    -- ESX Player Loaded Event
+    RegisterNetEvent('esx:playerLoaded', function(xPlayer)
+        PlayerData = xPlayer
+        PlayerLoaded = true
+    end)
+
+    -- ESX Set Job Event
+    RegisterNetEvent('esx:setJob', function(job)
+        if PlayerData then
+            PlayerData.job = job
+        end
+    end)
+
+    -- QBCore Player Loaded Event
+    RegisterNetEvent('QBCore:Client:OnPlayerLoaded', function()
+        PlayerLoaded = true
+        if Framework.Type == 'qbcore' and Framework.Object then
+            PlayerData = Framework.Object.Functions.GetPlayerData()
+        end
+    end)
+
+    -- QBCore Player Data Update
+    RegisterNetEvent('QBCore:Player:SetPlayerData', function(data)
+        PlayerData = data
+    end)
+
     -- Get player data
     function Framework.GetPlayerData()
-        if Framework.Type == 'qbcore' then
-            return Framework.Object.Functions.GetPlayerData()
-        elseif Framework.Type == 'esx' then
-            return Framework.Object.GetPlayerData()
+        if not PlayerLoaded then
+            return nil
         end
-        return nil
+
+        if Framework.Type == 'qbcore' then
+            if Framework.Object and Framework.Object.Functions then
+                return Framework.Object.Functions.GetPlayerData()
+            end
+        elseif Framework.Type == 'esx' then
+            if Framework.Object and Framework.Object.GetPlayerData then
+                return Framework.Object.GetPlayerData()
+            end
+        end
+        return PlayerData or nil
+    end
+
+    -- Check if player is loaded
+    function Framework.IsPlayerLoaded()
+        return PlayerLoaded
     end
 
     -- Check if player is dead
     function Framework.IsPlayerDead()
+        if not Framework.Type or not Framework.Object then
+            return false
+        end
+
         if Framework.Type == 'qbcore' then
-            local playerData = Framework.Object.Functions.GetPlayerData()
-            return playerData.metadata and (playerData.metadata["isdead"] or playerData.metadata["inlaststand"])
+            if Framework.Object.Functions and Framework.Object.Functions.GetPlayerData then
+                local playerData = Framework.Object.Functions.GetPlayerData()
+                if playerData and playerData.metadata then
+                    return playerData.metadata["isdead"] or playerData.metadata["inlaststand"] or false
+                end
+            end
         elseif Framework.Type == 'esx' then
-            local playerData = Framework.Object.GetPlayerData()
-            return playerData.dead or false
+            if Framework.Object.GetPlayerData then
+                local playerData = Framework.Object.GetPlayerData()
+                if playerData then
+                    return playerData.dead or false
+                end
+            end
         end
         return false
     end

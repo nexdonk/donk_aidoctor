@@ -1,10 +1,22 @@
--- Initialize framework
-Framework.Init()
+-- Initialize framework with retry logic
+Citizen.CreateThread(function()
+    local maxRetries = 10
+    local retries = 0
 
-if not Framework.Object then
-    print('[donk_aidoctor] ERROR: Failed to initialize framework! Script will not work.')
-    return
-end
+    while not Framework.Object and retries < maxRetries do
+        Framework.Init()
+        if Framework.Object then
+            print('[donk_aidoctor] Framework initialized: ' .. (Framework.Type or 'unknown'))
+            break
+        end
+        retries = retries + 1
+        Citizen.Wait(1000)
+    end
+
+    if not Framework.Object then
+        print('[donk_aidoctor] ERROR: Failed to initialize framework after ' .. maxRetries .. ' attempts! Script will not work.')
+    end
+end)
 
 -- State variables
 local Active = false
@@ -33,6 +45,22 @@ end
 
 -- Register command to call AI doctor
 RegisterCommand(Config.Command, function(source, args, raw)
+    -- Check if framework is initialized
+    if not Framework or not Framework.Type or not Framework.Object then
+        print('[donk_aidoctor] Framework not initialized yet!')
+        return
+    end
+
+    -- Check if player is loaded
+    if Framework.IsPlayerLoaded and not Framework.IsPlayerLoaded() then
+        lib.notify({
+            title = 'AI Doctor',
+            description = 'Please wait for your character to load',
+            type = 'error'
+        })
+        return
+    end
+
     -- Prevent spam
     if ProcessingCall then
         Framework.Notify(Config.Locale['doctor_called'], 'info')
