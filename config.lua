@@ -22,13 +22,15 @@ Config.SocietyAccount = 'ambulance' -- Society/job account name to receive payme
 -- Doctor Vehicle Settings
 Config.VehicleModel = 'ambulance' -- Vehicle model to spawn
 Config.VehiclePlate = 'DOCTOR' -- License plate for doctor vehicle
-Config.SpawnDistance = 40.0 -- Distance from player to spawn vehicle (in GTA units)
+Config.SpawnDistance = 75.0 -- Distance from player to spawn vehicle (in GTA units)
 Config.SpawnOffset = 5.0 -- Height offset for vehicle spawn to avoid spawning in ground
+Config.SpawnZThreshold = 8.0 -- Max vertical (Z) difference between player and chosen road node. Prevents the doctor spawning on a bridge above/below the player.
 
 -- Doctor NPC Settings
 Config.DoctorPed = 's_m_m_doctor_01' -- Ped model for the doctor
 Config.DoctorSpeed = 20.0 -- Driving speed for doctor (in m/s)
 Config.DoctorDrivingStyle = 786603 -- Driving style flags (786603 = normal, cautious)
+Config.UseSiren = true -- Run lights and sirens while driving to the player (turns off when the doctor arrives)
 
 -- Proximity Settings
 Config.ApproachDistance = 15.0 -- Distance at which doctor starts walking to player

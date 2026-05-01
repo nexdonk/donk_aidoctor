@@ -98,12 +98,39 @@ function SpawnDoctor(playerPos)
     end
 
     local spawnRadius = Config.SpawnDistance
-    local found, spawnPos, spawnHeading = GetClosestVehicleNodeWithHeading(
-        playerPos.x + math.random(-spawnRadius, spawnRadius),
-        playerPos.y + math.random(-spawnRadius, spawnRadius),
-        playerPos.z,
-        0, 3, 0
-    )
+    local zThreshold = Config.SpawnZThreshold or 8.0
+    local searchX = playerPos.x + math.random(-spawnRadius, spawnRadius)
+    local searchY = playerPos.y + math.random(-spawnRadius, spawnRadius)
+
+    local spawnPos, spawnHeading
+    local fallbackPos, fallbackHeading
+    local found = false
+
+    for nth = 1, 25 do
+        local ok, nodePos, nodeHeading = GetNthClosestVehicleNodeWithHeading(
+            searchX, searchY, playerPos.z, nth, 1, 3.0, 0
+        )
+        if ok then
+            if not fallbackPos then
+                fallbackPos = nodePos
+                fallbackHeading = nodeHeading
+            end
+            if math.abs(nodePos.z - playerPos.z) <= zThreshold then
+                spawnPos = nodePos
+                spawnHeading = nodeHeading
+                found = true
+                DebugPrint(string.format('Found road node at same elevation (dz=%.2f) on attempt %d', nodePos.z - playerPos.z, nth))
+                break
+            end
+        end
+    end
+
+    if not found and fallbackPos then
+        DebugPrint(string.format('No node within %.1fm Z of player; falling back to nearest (dz=%.2f)', zThreshold, fallbackPos.z - playerPos.z))
+        spawnPos = fallbackPos
+        spawnHeading = fallbackHeading
+        found = true
+    end
 
     if not found then
         DebugPrint('Could not find vehicle node, using random position')
@@ -128,6 +155,12 @@ function SpawnDoctor(playerPos)
     SetVehicleNumberPlateText(DoctorVehicle, Config.VehiclePlate)
     SetEntityAsMissionEntity(DoctorVehicle, true, true)
     SetVehicleEngineOn(DoctorVehicle, true, true, false)
+
+    if Config.UseSiren then
+        SetVehicleSiren(DoctorVehicle, true)
+        SetSirenWithNoDriver(DoctorVehicle, true)
+        SetVehicleHasMutedSirens(DoctorVehicle, false)
+    end
 
     DebugPrint('Doctor vehicle spawned at', spawnPos)
 
@@ -208,6 +241,10 @@ Citizen.CreateThread(function()
                 elseif distToVehicle <= Config.ApproachDistance then
                     if not hasExitedVehicle then
                         DebugPrint('Doctor within approach distance')
+
+                        if Config.UseSiren and DoesEntityExist(DoctorVehicle) then
+                            SetVehicleSiren(DoctorVehicle, false)
+                        end
 
                         if IsPedInVehicle(DoctorPed, DoctorVehicle, false) then
                             TaskLeaveVehicle(DoctorPed, DoctorVehicle, 0)
