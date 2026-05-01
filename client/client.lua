@@ -1,10 +1,3 @@
--- =============================================================
--- donk_aidoctor :: client
--- Smart AI EMS dispatch with state machine, live retargeting,
--- stuck detection, and recovery ladder so the doctor never
--- gets lost or stuck on the way to a downed player.
--- =============================================================
-
 Citizen.CreateThread(function()
     local maxRetries = 10
     local retries = 0
@@ -24,32 +17,12 @@ Citizen.CreateThread(function()
     end
 end)
 
--- ---------- State ----------
-local STATE = {
-    IDLE      = 'idle',
-    DISPATCH  = 'dispatch',
-    DRIVING   = 'driving',
-    DEBOARD   = 'deboard',
-    WALKING   = 'walking',
-    TREATING  = 'treating',
-    DONE      = 'done',
-}
-
-local Doctor = {
-    state         = STATE.IDLE,
-    vehicle       = nil,
-    ped           = nil,
-    blip          = nil,
-    lastTargetPos = nil,   -- last position the doctor was tasked toward
-    stuckTimer    = 0.0,   -- accumulated seconds of low-velocity while not arrived
-    stateStarted  = 0,     -- GetGameTimer() ms when current state began
-    dispatchStart = 0,     -- GetGameTimer() ms when the call was placed
-    recoveryUsed  = 0,     -- how many recovery teleports already burned
-}
-
+local Active = false
+local DoctorVehicle = nil
+local DoctorPed = nil
+local DoctorBlip = nil
 local ProcessingCall = false
 
--- ---------- Helpers ----------
 local function DebugPrint(...)
     if Config.Debug then
         print('[donk_aidoctor]', ...)
@@ -66,515 +39,6 @@ local function FormatTime(seconds)
     end
 end
 
-local function SetState(newState)
-    if Doctor.state == newState then return end
-    DebugPrint(string.format('STATE: %s -> %s', Doctor.state, newState))
-    Doctor.state = newState
-    Doctor.stateStarted = GetGameTimer()
-    Doctor.stuckTimer = 0.0
-end
-
-local function GetSpeed(entity)
-    if not entity or not DoesEntityExist(entity) then return 0.0 end
-    local v = GetEntityVelocity(entity)
-    return math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
-end
-
--- Validate a candidate spawn coord: must be near ground, not in water, reasonable distance.
-local function ValidateSpawnPoint(coord, playerPos)
-    -- Reject if too far from player vertically (probably wrong floor / inside building)
-    if math.abs(coord.z - playerPos.z) > 25.0 then
-        return false
-    end
-
-    -- Reject if in water
-    local _, waterHeight = GetWaterHeight(coord.x, coord.y, coord.z)
-    if waterHeight and waterHeight > coord.z - 0.5 then
-        return false
-    end
-
-    return true
-end
-
--- Find a road node near a target position with retries and ground correction.
-local function FindGoodSpawnPoint(playerPos)
-    local baseRadius = Config.SpawnDistance
-    local attempts = Config.MaxSpawnAttempts or 6
-
-    for i = 1, attempts do
-        local radius = baseRadius * math.pow(Config.SpawnSearchExpansion or 1.5, i - 1)
-        local angle = math.random() * 2 * math.pi
-        local sx = playerPos.x + math.cos(angle) * radius
-        local sy = playerPos.y + math.sin(angle) * radius
-
-        local found, nodePos, heading = GetClosestVehicleNodeWithHeading(sx, sy, playerPos.z, 1, 3.0, 0)
-        if found then
-            -- Snap Z to actual ground when possible
-            local hitGround, groundZ = GetGroundZFor_3dCoord(nodePos.x, nodePos.y, nodePos.z + 2.0, false)
-            if hitGround then
-                nodePos = vector3(nodePos.x, nodePos.y, groundZ)
-            end
-
-            if ValidateSpawnPoint(nodePos, playerPos) then
-                DebugPrint(string.format('Spawn candidate %d accepted at %.1f,%.1f,%.1f', i, nodePos.x, nodePos.y, nodePos.z))
-                return nodePos, heading
-            else
-                DebugPrint(string.format('Spawn candidate %d rejected (validation)', i))
-            end
-        else
-            DebugPrint(string.format('Spawn candidate %d: no road node', i))
-        end
-    end
-
-    -- Fallback: just plop the vehicle at player.z + offset
-    DebugPrint('All spawn candidates failed - using fallback near player')
-    return vector3(playerPos.x + 8.0, playerPos.y + 8.0, playerPos.z), 0.0
-end
-
-local function CleanupDoctor()
-    DebugPrint('Cleaning up doctor entities')
-
-    if Doctor.blip and DoesBlipExist(Doctor.blip) then
-        RemoveBlip(Doctor.blip)
-    end
-    if Doctor.ped and DoesEntityExist(Doctor.ped) then
-        SetEntityAsNoLongerNeeded(Doctor.ped)
-        DeleteEntity(Doctor.ped)
-    end
-    if Doctor.vehicle and DoesEntityExist(Doctor.vehicle) then
-        SetEntityAsNoLongerNeeded(Doctor.vehicle)
-        DeleteEntity(Doctor.vehicle)
-    end
-
-    Doctor.vehicle = nil
-    Doctor.ped = nil
-    Doctor.blip = nil
-    Doctor.lastTargetPos = nil
-    Doctor.recoveryUsed = 0
-    SetState(STATE.IDLE)
-end
-
-local function AbortCall(reason, notifyPlayer, refund)
-    DebugPrint('Aborting call:', reason)
-    if notifyPlayer then
-        Framework.Notify(Config.Locale['doctor_failed'], 'error')
-    end
-    CleanupDoctor()
-    if refund then
-        TriggerServerEvent('donk_aidoctor:dispatchFailed')
-    end
-    ProcessingCall = false
-end
-
--- ---------- Models ----------
-local function LoadModel(hash)
-    RequestModel(hash)
-    local timeout = GetGameTimer() + 10000
-    while not HasModelLoaded(hash) and GetGameTimer() < timeout do
-        Wait(10)
-    end
-    return HasModelLoaded(hash)
-end
-
--- ---------- Spawning ----------
-local function SpawnDoctor(playerPos)
-    DebugPrint('Spawning doctor vehicle and NPC...')
-    SetState(STATE.DISPATCH)
-
-    local vehicleHash = GetHashKey(Config.VehicleModel)
-    local pedHash = GetHashKey(Config.DoctorPed)
-
-    if not LoadModel(vehicleHash) or not LoadModel(pedHash) then
-        DebugPrint('ERROR: Failed to load required models')
-        AbortCall('model load failed', true, true)
-        return false
-    end
-
-    local spawnPos, spawnHeading = FindGoodSpawnPoint(playerPos)
-
-    -- Clear traffic from spawn point BEFORE creating our vehicle (the original code did this after, which can delete the doctor's car)
-    ClearAreaOfVehicles(spawnPos.x, spawnPos.y, spawnPos.z, 8.0, false, false, false, false, false)
-
-    Doctor.vehicle = CreateVehicle(vehicleHash, spawnPos.x, spawnPos.y, spawnPos.z + (Config.SpawnOffset or 0.0), spawnHeading, true, false)
-    if not DoesEntityExist(Doctor.vehicle) then
-        DebugPrint('ERROR: vehicle did not spawn')
-        AbortCall('vehicle spawn failed', true, true)
-        return false
-    end
-
-    SetVehicleOnGroundProperly(Doctor.vehicle)
-    SetVehicleNumberPlateText(Doctor.vehicle, Config.VehiclePlate)
-    SetEntityAsMissionEntity(Doctor.vehicle, true, true)
-    SetVehicleEngineOn(Doctor.vehicle, true, true, false)
-    SetVehicleHasBeenOwnedByPlayer(Doctor.vehicle, false)
-    SetVehicleSiren(Doctor.vehicle, true)
-
-    Doctor.ped = CreatePedInsideVehicle(Doctor.vehicle, 26, pedHash, -1, true, false)
-    if not DoesEntityExist(Doctor.ped) then
-        DebugPrint('ERROR: ped did not spawn')
-        AbortCall('ped spawn failed', true, true)
-        return false
-    end
-
-    SetEntityAsMissionEntity(Doctor.ped, true, true)
-    SetBlockingOfNonTemporaryEvents(Doctor.ped, true)
-    SetPedFleeAttributes(Doctor.ped, 0, false)
-    SetPedCombatAttributes(Doctor.ped, 17, true)        -- always flee from threat... by not engaging
-    SetPedCanRagdoll(Doctor.ped, false)                  -- don't trip on stairs
-    SetPedCanBeKnockedOffVehicle(Doctor.ped, 1)
-    SetDriverAbility(Doctor.ped, 1.0)
-    SetDriverAggressiveness(Doctor.ped, 0.0)
-
-    if Config.ShowBlip then
-        Doctor.blip = AddBlipForEntity(Doctor.vehicle)
-        SetBlipSprite(Doctor.blip, Config.BlipSprite)
-        SetBlipColour(Doctor.blip, Config.BlipColor)
-        if Config.BlipFlash then SetBlipFlashes(Doctor.blip, true) end
-        BeginTextCommandSetBlipName("STRING")
-        AddTextComponentString("AI Doctor")
-        EndTextCommandSetBlipName(Doctor.blip)
-    end
-
-    if Config.PlayArrivalSound then
-        PlaySoundFrontend(-1, Config.ArrivalSound.name, Config.ArrivalSound.set, 1)
-    end
-
-    SetModelAsNoLongerNeeded(vehicleHash)
-    SetModelAsNoLongerNeeded(pedHash)
-
-    Doctor.dispatchStart = GetGameTimer()
-    Doctor.recoveryUsed = 0
-
-    -- Issue initial drive task toward the player.
-    Doctor.lastTargetPos = playerPos
-    TaskVehicleDriveToCoordLongrange(
-        Doctor.ped,
-        Doctor.vehicle,
-        playerPos.x, playerPos.y, playerPos.z,
-        Config.DoctorSpeed,
-        Config.DoctorDrivingStyle,
-        5.0
-    )
-
-    SetState(STATE.DRIVING)
-    Framework.Notify(Config.Locale['doctor_arriving'], 'info')
-    return true
-end
-
--- ---------- Recovery actions ----------
--- Re-route: just refresh the drive task using the *current* player position.
-local function ReissueDriveTask(playerPos)
-    if not (Doctor.ped and Doctor.vehicle and DoesEntityExist(Doctor.ped) and DoesEntityExist(Doctor.vehicle)) then return end
-
-    if not IsPedInVehicle(Doctor.ped, Doctor.vehicle, false) then
-        -- Ped got out somehow - put them back in
-        TaskWarpPedIntoVehicle(Doctor.ped, Doctor.vehicle, -1)
-    end
-
-    ClearPedTasks(Doctor.ped)
-    Wait(50)
-    TaskVehicleDriveToCoordLongrange(
-        Doctor.ped,
-        Doctor.vehicle,
-        playerPos.x, playerPos.y, playerPos.z,
-        Config.DoctorSpeed,
-        Config.DoctorDrivingStyle,
-        5.0
-    )
-    Doctor.lastTargetPos = playerPos
-end
-
--- Teleport vehicle to a safe road node near the player (used when stuck driving).
-local function TeleportVehicleNearPlayer(playerPos)
-    if not Config.TeleportRecovery then return false end
-    if not (Doctor.vehicle and DoesEntityExist(Doctor.vehicle)) then return false end
-
-    local found, nodePos, heading = GetClosestVehicleNodeWithHeading(
-        playerPos.x + math.random(-25, 25),
-        playerPos.y + math.random(-25, 25),
-        playerPos.z, 1, 3.0, 0
-    )
-    if not found then
-        nodePos = vector3(playerPos.x + 10.0, playerPos.y + 10.0, playerPos.z)
-        heading = 0.0
-    end
-
-    DebugPrint(string.format('RECOVERY: teleporting vehicle to %.1f,%.1f,%.1f', nodePos.x, nodePos.y, nodePos.z))
-    SetEntityCoords(Doctor.vehicle, nodePos.x, nodePos.y, nodePos.z, false, false, false, false)
-    SetEntityHeading(Doctor.vehicle, heading)
-    SetVehicleOnGroundProperly(Doctor.vehicle)
-    if Doctor.ped and not IsPedInVehicle(Doctor.ped, Doctor.vehicle, false) then
-        TaskWarpPedIntoVehicle(Doctor.ped, Doctor.vehicle, -1)
-    end
-    Doctor.recoveryUsed = Doctor.recoveryUsed + 1
-    Framework.Notify(Config.Locale['doctor_stuck'], 'info')
-    return true
-end
-
--- Teleport ped directly to player (final fallback for walking phase).
-local function TeleportPedNearPlayer(playerPos)
-    if not Config.TeleportRecovery then return false end
-    if not (Doctor.ped and DoesEntityExist(Doctor.ped)) then return false end
-
-    local angle = math.random() * 2 * math.pi
-    local px = playerPos.x + math.cos(angle) * 2.5
-    local py = playerPos.y + math.sin(angle) * 2.5
-    local pz = playerPos.z
-
-    local hit, gz = GetGroundZFor_3dCoord(px, py, pz + 2.0, false)
-    if hit then pz = gz end
-
-    DebugPrint('RECOVERY: teleporting ped near player')
-    SetEntityCoords(Doctor.ped, px, py, pz, false, false, false, false)
-    Doctor.recoveryUsed = Doctor.recoveryUsed + 1
-    return true
-end
-
--- ---------- State Machine Tick ----------
--- Forward declaration so TickWalking can call into the treatment routine.
-local StartTreatment
-
-local function TickDriving(playerPos, dt)
-    if not (Doctor.vehicle and DoesEntityExist(Doctor.vehicle) and Doctor.ped and DoesEntityExist(Doctor.ped)) then
-        AbortCall('vehicle/ped lost mid-drive', true, true)
-        return
-    end
-
-    local vehiclePos = GetEntityCoords(Doctor.vehicle)
-    local distToPlayer = #(playerPos - vehiclePos)
-
-    -- Player moved enough to warrant a re-route
-    if Doctor.lastTargetPos and #(playerPos - Doctor.lastTargetPos) > Config.RetargetThreshold then
-        DebugPrint(string.format('Player moved %.1fm - rerouting', #(playerPos - Doctor.lastTargetPos)))
-        ReissueDriveTask(playerPos)
-    end
-
-    -- Reached approach distance: switch to deboard
-    if distToPlayer <= Config.ApproachDistance then
-        SetState(STATE.DEBOARD)
-        return
-    end
-
-    -- Stuck detection
-    local speed = GetSpeed(Doctor.vehicle)
-    if speed < Config.StuckSpeedThreshold then
-        Doctor.stuckTimer = Doctor.stuckTimer + dt
-    else
-        Doctor.stuckTimer = 0.0
-    end
-
-    if Doctor.stuckTimer >= Config.StuckTimeVehicle then
-        DebugPrint(string.format('Vehicle stuck for %.1fs - recovery', Doctor.stuckTimer))
-        Doctor.stuckTimer = 0.0
-
-        if Doctor.recoveryUsed == 0 then
-            -- First recovery: just re-route
-            ReissueDriveTask(playerPos)
-            Doctor.recoveryUsed = 1
-            Framework.Notify(Config.Locale['doctor_rerouting'], 'info')
-        else
-            -- Subsequent: teleport vehicle closer
-            if TeleportVehicleNearPlayer(playerPos) then
-                ReissueDriveTask(playerPos)
-            end
-        end
-    end
-end
-
-local function TickDeboard(playerPos, dt)
-    if not (Doctor.ped and DoesEntityExist(Doctor.ped)) then
-        AbortCall('ped lost during deboard', true, true)
-        return
-    end
-
-    -- If player ran far away again, get back in vehicle and drive
-    if Doctor.vehicle and DoesEntityExist(Doctor.vehicle) then
-        if #(playerPos - GetEntityCoords(Doctor.vehicle)) > Config.ApproachDistance + 10.0 then
-            DebugPrint('Player moved away - returning to vehicle')
-            TaskWarpPedIntoVehicle(Doctor.ped, Doctor.vehicle, -1)
-            ReissueDriveTask(playerPos)
-            SetState(STATE.DRIVING)
-            return
-        end
-    end
-
-    if IsPedInVehicle(Doctor.ped, Doctor.vehicle, false) then
-        -- Issue exit task once (state-entry guarantees we only do this on transition)
-        if (GetGameTimer() - Doctor.stateStarted) < 250 then
-            TaskLeaveVehicle(Doctor.ped, Doctor.vehicle, 256) -- 256 = don't close door, exit immediately
-        end
-        -- Timeout: if still in vehicle after 6s, force them out
-        if (GetGameTimer() - Doctor.stateStarted) > 6000 then
-            DebugPrint('Forcing ped out of vehicle')
-            ClearPedTasksImmediately(Doctor.ped)
-            local p = GetEntityCoords(Doctor.vehicle)
-            SetEntityCoords(Doctor.ped, p.x + 1.5, p.y, p.z, false, false, false, false)
-        end
-    else
-        SetState(STATE.WALKING)
-    end
-end
-
-local function TickWalking(playerPos, dt)
-    if not (Doctor.ped and DoesEntityExist(Doctor.ped)) then
-        AbortCall('ped lost during walk', true, true)
-        return
-    end
-
-    local pedPos = GetEntityCoords(Doctor.ped)
-    local distToPlayer = #(playerPos - pedPos)
-
-    if distToPlayer <= Config.TreatmentDistance then
-        ClearPedTasks(Doctor.ped)
-        SetState(STATE.TREATING)
-        StartTreatment()
-        return
-    end
-
-    -- Re-issue task only when player moved (or first entry, or task was cleared)
-    local needRetask = false
-    if not Doctor.lastTargetPos then
-        needRetask = true
-    elseif #(playerPos - Doctor.lastTargetPos) > Config.RetargetThreshold then
-        needRetask = true
-    elseif (GetGameTimer() - Doctor.stateStarted) < 250 then
-        needRetask = true
-    end
-
-    if needRetask then
-        TaskGoToCoordAnyMeans(Doctor.ped, playerPos.x, playerPos.y, playerPos.z, 2.0, 0, false, 786603, 0xbf800000)
-        Doctor.lastTargetPos = playerPos
-    end
-
-    -- Stuck detection on foot
-    local speed = GetSpeed(Doctor.ped)
-    if speed < Config.StuckSpeedThreshold then
-        Doctor.stuckTimer = Doctor.stuckTimer + dt
-    else
-        Doctor.stuckTimer = 0.0
-    end
-
-    if Doctor.stuckTimer >= Config.StuckTimeWalking then
-        DebugPrint(string.format('Ped stuck on foot for %.1fs - teleporting', Doctor.stuckTimer))
-        Doctor.stuckTimer = 0.0
-        TeleportPedNearPlayer(playerPos)
-        ClearPedTasks(Doctor.ped)
-        Doctor.lastTargetPos = nil -- force retask next tick
-    end
-end
-
--- ---------- Treatment ----------
-StartTreatment = function()
-    DebugPrint('Starting treatment sequence')
-
-    if not (Doctor.ped and DoesEntityExist(Doctor.ped)) then
-        AbortCall('ped lost before treatment', true, true)
-        return
-    end
-
-    local animDict = Config.DoctorAnimation.dict
-    RequestAnimDict(animDict)
-    local timeout = GetGameTimer() + 5000
-    while not HasAnimDictLoaded(animDict) and GetGameTimer() < timeout do
-        Citizen.Wait(50)
-    end
-
-    -- Face the player
-    local playerPos = GetEntityCoords(PlayerPedId())
-    TaskTurnPedToFaceCoord(Doctor.ped, playerPos.x, playerPos.y, playerPos.z, 1000)
-    Wait(800)
-
-    TaskPlayAnim(Doctor.ped, animDict, Config.DoctorAnimation.anim, 1.0, 1.0, -1, 9, 1.0, 0, 0, 0)
-
-    Framework.ShowProgress(
-        Config.Locale['treatment_progress'],
-        Config.ReviveTime,
-        {
-            name = "revive_doc",
-            disableMovement = false,
-            disableCarMovement = false,
-            disableMouse = false,
-            disableCombat = true,
-            useWhileDead = true,
-            canCancel = false,
-            anim = {}
-        },
-        function(completed)
-            if completed then
-                DebugPrint('Treatment completed')
-                if Doctor.ped and DoesEntityExist(Doctor.ped) then
-                    ClearPedTasks(Doctor.ped)
-                end
-                Wait(500)
-                TriggerServerEvent("donk_aidoctor:revivePlayer")
-                StopScreenEffect('DeathFailOut')
-                local message = string.format("%s ($%s)", Config.Locale['treatment_complete'], Config.Price)
-                Framework.Notify(message, 'success')
-                CleanupDoctor()
-                ProcessingCall = false
-            else
-                DebugPrint('Treatment cancelled')
-                CleanupDoctor()
-                ProcessingCall = false
-            end
-        end
-    )
-end
-
--- ---------- Main loop ----------
-Citizen.CreateThread(function()
-    local lastTick = GetGameTimer()
-    while true do
-        Citizen.Wait(250)
-        local now = GetGameTimer()
-        local dt = (now - lastTick) / 1000.0
-        lastTick = now
-
-        if Doctor.state == STATE.IDLE then
-            -- nothing to do
-        else
-            local playerPos = GetEntityCoords(PlayerPedId())
-
-            -- Overall dispatch timeout (safety net)
-            if Config.OverallTimeout and Config.OverallTimeout > 0 then
-                local elapsed = (now - Doctor.dispatchStart) / 1000.0
-                if elapsed > Config.OverallTimeout and Doctor.state ~= STATE.TREATING then
-                    DebugPrint(string.format('Overall timeout %.1fs reached - forced recovery', elapsed))
-                    -- Skip to walking by warping ped near player
-                    if Doctor.ped and DoesEntityExist(Doctor.ped) then
-                        TeleportPedNearPlayer(playerPos)
-                        ClearPedTasks(Doctor.ped)
-                        Doctor.lastTargetPos = nil
-                        Doctor.dispatchStart = now -- reset so we don't spam
-                        SetState(STATE.WALKING)
-                    else
-                        AbortCall('overall timeout, no ped', true, true)
-                    end
-                end
-            end
-
-            if Doctor.state == STATE.DRIVING then
-                TickDriving(playerPos, dt)
-            elseif Doctor.state == STATE.DEBOARD then
-                TickDeboard(playerPos, dt)
-            elseif Doctor.state == STATE.WALKING then
-                TickWalking(playerPos, dt)
-            elseif Doctor.state == STATE.TREATING then
-                -- treatment is driven by ShowProgress callback; nothing to do here
-            end
-
-            if Config.Debug and Doctor.state ~= STATE.IDLE and Doctor.state ~= STATE.TREATING then
-                if Doctor.vehicle and DoesEntityExist(Doctor.vehicle) then
-                    local vp = GetEntityCoords(Doctor.vehicle)
-                    print(string.format('[donk_aidoctor] state=%s veh_dist=%.1f stuck=%.1fs',
-                        Doctor.state, #(playerPos - vp), Doctor.stuckTimer))
-                end
-            end
-        end
-    end
-end)
-
--- ---------- Commands ----------
 RegisterCommand(Config.Command, function(source, args, raw)
     if not Framework or not Framework.Type or not Framework.Object then
         print('[donk_aidoctor] Framework not initialized yet!')
@@ -597,12 +61,9 @@ RegisterCommand(Config.Command, function(source, args, raw)
     Framework.TriggerCallback('donk_aidoctor:docOnline', function(canCall, hasEnoughMoney, reason, extraData)
         if canCall and hasEnoughMoney and reason == 'success' then
             DebugPrint('All checks passed - spawning doctor')
-            local ok = SpawnDoctor(GetEntityCoords(PlayerPedId()))
-            if ok then
-                TriggerServerEvent('donk_aidoctor:charge')
-                Framework.Notify(Config.Locale['doctor_called'], 'success')
-            end
-            -- if not ok, SpawnDoctor already aborted and reset ProcessingCall
+            SpawnDoctor(GetEntityCoords(PlayerPedId()))
+            TriggerServerEvent('donk_aidoctor:charge')
+            Framework.Notify(Config.Locale['doctor_called'], 'success')
         else
             if reason == 'cooldown' then
                 local timeLeft = extraData or 0
@@ -621,18 +82,241 @@ RegisterCommand(Config.Command, function(source, args, raw)
     end)
 end)
 
-if Config.AllowCancelCommand then
-    RegisterCommand(Config.CancelCommand, function()
-        if not ProcessingCall and Doctor.state == STATE.IDLE then
-            Framework.Notify(Config.Locale['no_active_call'], 'error')
-            return
+function SpawnDoctor(playerPos)
+    DebugPrint('Spawning doctor vehicle and NPC...')
+
+    local vehicleHash = GetHashKey(Config.VehicleModel)
+    RequestModel(vehicleHash)
+    while not HasModelLoaded(vehicleHash) do
+        Wait(10)
+    end
+
+    local pedHash = GetHashKey(Config.DoctorPed)
+    RequestModel(pedHash)
+    while not HasModelLoaded(pedHash) do
+        Wait(10)
+    end
+
+    local spawnRadius = Config.SpawnDistance
+    local found, spawnPos, spawnHeading = GetClosestVehicleNodeWithHeading(
+        playerPos.x + math.random(-spawnRadius, spawnRadius),
+        playerPos.y + math.random(-spawnRadius, spawnRadius),
+        playerPos.z,
+        0, 3, 0
+    )
+
+    if not found then
+        DebugPrint('Could not find vehicle node, using random position')
+        spawnPos = vector3(
+            playerPos.x + math.random(-spawnRadius, spawnRadius),
+            playerPos.y + math.random(-spawnRadius, spawnRadius),
+            playerPos.z
+        )
+        spawnHeading = math.random(0, 359)
+    end
+
+    if DoctorVehicle and DoesEntityExist(DoctorVehicle) then
+        DeleteEntity(DoctorVehicle)
+    end
+    if DoctorPed and DoesEntityExist(DoctorPed) then
+        DeleteEntity(DoctorPed)
+    end
+
+    DoctorVehicle = CreateVehicle(vehicleHash, spawnPos.x, spawnPos.y, spawnPos.z + Config.SpawnOffset, spawnHeading, true, false)
+    ClearAreaOfVehicles(GetEntityCoords(DoctorVehicle), 5.0, false, false, false, false, false)
+    SetVehicleOnGroundProperly(DoctorVehicle)
+    SetVehicleNumberPlateText(DoctorVehicle, Config.VehiclePlate)
+    SetEntityAsMissionEntity(DoctorVehicle, true, true)
+    SetVehicleEngineOn(DoctorVehicle, true, true, false)
+
+    DebugPrint('Doctor vehicle spawned at', spawnPos)
+
+    DoctorPed = CreatePedInsideVehicle(DoctorVehicle, 26, pedHash, -1, true, false)
+    SetEntityAsMissionEntity(DoctorPed, true, true)
+    SetBlockingOfNonTemporaryEvents(DoctorPed, true)
+    SetPedFleeAttributes(DoctorPed, 0, false)
+
+    DebugPrint('Doctor NPC created')
+
+    if Config.ShowBlip then
+        DoctorBlip = AddBlipForEntity(DoctorVehicle)
+        SetBlipSprite(DoctorBlip, Config.BlipSprite)
+        SetBlipColour(DoctorBlip, Config.BlipColor)
+        if Config.BlipFlash then
+            SetBlipFlashes(DoctorBlip, true)
         end
-        Framework.Notify(Config.Locale['call_cancelled'], 'info')
-        AbortCall('player cancelled', false, true)
-    end)
+        BeginTextCommandSetBlipName("STRING")
+        AddTextComponentString("AI Doctor")
+        EndTextCommandSetBlipName(DoctorBlip)
+    end
+
+    if Config.PlayArrivalSound then
+        PlaySoundFrontend(-1, Config.ArrivalSound.name, Config.ArrivalSound.set, 1)
+    end
+
+    Wait(2000)
+
+    TaskVehicleDriveToCoord(
+        DoctorPed,
+        DoctorVehicle,
+        playerPos.x,
+        playerPos.y,
+        playerPos.z,
+        Config.DoctorSpeed,
+        0,
+        GetEntityModel(DoctorVehicle),
+        Config.DoctorDrivingStyle,
+        2.0
+    )
+
+    DebugPrint('Doctor driving to player location')
+
+    Active = true
+    ProcessingCall = false
 end
 
--- ---------- Cleanup ----------
+Citizen.CreateThread(function()
+    local hasExitedVehicle = false
+
+    while true do
+        Citizen.Wait(500)
+
+        if Active and DoctorVehicle and DoctorPed then
+            if not DoesEntityExist(DoctorVehicle) or not DoesEntityExist(DoctorPed) then
+                DebugPrint('Doctor entities no longer exist - resetting state')
+                CleanupDoctor()
+                Active = false
+                hasExitedVehicle = false
+            else
+                local playerPos = GetEntityCoords(PlayerPedId())
+                local vehiclePos = GetEntityCoords(DoctorVehicle)
+                local pedPos = GetEntityCoords(DoctorPed)
+
+                local distToVehicle = #(playerPos - vehiclePos)
+                local distToPed = #(playerPos - pedPos)
+
+                if Config.Debug then
+                    print(string.format('[donk_aidoctor] Dist to vehicle: %.2f | Dist to ped: %.2f', distToVehicle, distToPed))
+                end
+
+                if distToPed <= Config.TreatmentDistance then
+                    DebugPrint('Doctor close enough - starting treatment')
+                    Active = false
+                    hasExitedVehicle = false
+                    ClearPedTasksImmediately(DoctorPed)
+                    StartTreatment()
+                elseif distToVehicle <= Config.ApproachDistance then
+                    if not hasExitedVehicle then
+                        DebugPrint('Doctor within approach distance')
+
+                        if IsPedInVehicle(DoctorPed, DoctorVehicle, false) then
+                            TaskLeaveVehicle(DoctorPed, DoctorVehicle, 0)
+                            DebugPrint('Doctor exiting vehicle')
+                            hasExitedVehicle = true
+                            Citizen.Wait(3000)
+                        else
+                            hasExitedVehicle = true
+                        end
+                    end
+
+                    if hasExitedVehicle then
+                        TaskGoToCoordAnyMeans(
+                            DoctorPed,
+                            playerPos.x,
+                            playerPos.y,
+                            playerPos.z,
+                            1.0, 0, 0,
+                            786603,
+                            0xbf800000
+                        )
+                    end
+                end
+            end
+        else
+            hasExitedVehicle = false
+        end
+    end
+end)
+
+function StartTreatment()
+    DebugPrint('Starting treatment sequence')
+
+    local animDict = Config.DoctorAnimation.dict
+    RequestAnimDict(animDict)
+    while not HasAnimDictLoaded(animDict) do
+        Citizen.Wait(100)
+    end
+
+    TaskPlayAnim(
+        DoctorPed,
+        animDict,
+        Config.DoctorAnimation.anim,
+        1.0, 1.0, -1, 9, 1.0, 0, 0, 0
+    )
+
+    Framework.ShowProgress(
+        Config.Locale['treatment_progress'],
+        Config.ReviveTime,
+        {
+            name = "revive_doc",
+            disableMovement = false,
+            disableCarMovement = false,
+            disableMouse = false,
+            disableCombat = true,
+            useWhileDead = true,
+            canCancel = false,
+            anim = {}
+        },
+        function(completed)
+            if completed then
+                DebugPrint('Treatment completed')
+
+                ClearPedTasks(DoctorPed)
+                Wait(500)
+
+                TriggerServerEvent("donk_aidoctor:revivePlayer")
+
+                StopScreenEffect('DeathFailOut')
+
+                local message = string.format("%s ($%s)", Config.Locale['treatment_complete'], Config.Price)
+                Framework.Notify(message, 'success')
+
+                CleanupDoctor()
+
+                Wait(5000)
+                ProcessingCall = false
+            else
+                DebugPrint('Treatment cancelled')
+                CleanupDoctor()
+                ProcessingCall = false
+            end
+        end
+    )
+end
+
+function CleanupDoctor()
+    DebugPrint('Cleaning up doctor entities')
+
+    if DoctorBlip and DoesBlipExist(DoctorBlip) then
+        RemoveBlip(DoctorBlip)
+        DoctorBlip = nil
+    end
+
+    if DoctorPed and DoesEntityExist(DoctorPed) then
+        SetEntityAsNoLongerNeeded(DoctorPed)
+        DeleteEntity(DoctorPed)
+        DoctorPed = nil
+    end
+
+    if DoctorVehicle and DoesEntityExist(DoctorVehicle) then
+        SetEntityAsNoLongerNeeded(DoctorVehicle)
+        DeleteEntity(DoctorVehicle)
+        DoctorVehicle = nil
+    end
+
+    Active = false
+end
+
 AddEventHandler('onResourceStop', function(resourceName)
     if GetCurrentResourceName() == resourceName then
         CleanupDoctor()

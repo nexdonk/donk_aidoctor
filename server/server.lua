@@ -12,7 +12,6 @@ local function DebugPrint(...)
 end
 
 local PlayerCooldowns = {}
-local PlayerLastCharge = {} -- src -> { amount = N, account = 'cash'|'bank' } for refund on dispatch failure
 
 local function IsOnCooldown(source)
     if not Config.Cooldown or Config.Cooldown <= 0 then
@@ -130,7 +129,6 @@ RegisterNetEvent('donk_aidoctor:charge', function()
         DebugPrint('Player charged', Config.Price, 'from', accountUsed)
 
         SetCooldown(src)
-        PlayerLastCharge[tostring(src)] = { amount = Config.Price, account = accountUsed }
 
         if Config.SendToSociety then
             Framework.AddSocietyMoney(Config.SocietyAccount, Config.Price)
@@ -139,43 +137,6 @@ RegisterNetEvent('donk_aidoctor:charge', function()
     else
         DebugPrint('Failed to charge player - insufficient funds')
     end
-end)
-
--- Called when the client-side dispatch fails (vehicle stuck unrecoverably,
--- spawn failed, player cancelled). Refund the charge and clear cooldown
--- so the player isn't punished for the AI being dumb.
-RegisterNetEvent('donk_aidoctor:dispatchFailed', function()
-    local src = source
-    local key = tostring(src)
-    local last = PlayerLastCharge[key]
-
-    if not last then
-        DebugPrint('dispatchFailed but no charge on record for', src)
-        PlayerCooldowns[key] = nil
-        return
-    end
-
-    local player = Framework.GetPlayer(src)
-    if player then
-        if Framework.Type == 'qbcore' then
-            player.Functions.AddMoney(last.account or 'cash', last.amount, 'AI Doctor refund')
-        elseif Framework.Type == 'esx' then
-            if (last.account or 'cash') == 'bank' then
-                player.addAccountMoney('bank', last.amount)
-            else
-                player.addMoney(last.amount)
-            end
-        end
-        DebugPrint('Refunded', last.amount, 'to', src, 'from', last.account)
-    end
-
-    -- Pull society money back if we sent it there
-    if Config.SendToSociety and Framework.RemoveSocietyMoney then
-        Framework.RemoveSocietyMoney(Config.SocietyAccount, last.amount)
-    end
-
-    PlayerLastCharge[key] = nil
-    PlayerCooldowns[key] = nil
 end)
 
 RegisterNetEvent('donk_aidoctor:revivePlayer', function()
@@ -191,9 +152,6 @@ RegisterNetEvent('donk_aidoctor:revivePlayer', function()
             player.Functions.SetMetaData("inlaststand", false)
         end
     end
-
-    -- Successful treatment - clear the refund record so a later dispatchFailed can't double-refund
-    PlayerLastCharge[tostring(src)] = nil
 end)
 
 AddEventHandler('playerDropped', function()
@@ -203,7 +161,6 @@ AddEventHandler('playerDropped', function()
         PlayerCooldowns[playerId] = nil
         DebugPrint('Cleared cooldown for disconnected player:', src)
     end
-    PlayerLastCharge[playerId] = nil
 end)
 
 DebugPrint('Server script loaded successfully')

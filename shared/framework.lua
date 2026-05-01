@@ -358,22 +358,6 @@ if IsDuplicityVersion() then
         end
     end
 
-    -- Remove money from society/job account (used for refunds when dispatch fails)
-    function Framework.RemoveSocietyMoney(jobName, amount)
-        if Framework.Type == 'qbcore' then
-            if GetResourceState('qb-management') == 'started' or GetResourceState('qb-bossmenu') == 'started' then
-                pcall(function() exports['qb-management']:RemoveMoney(jobName, amount) end)
-            end
-        elseif Framework.Type == 'esx' then
-            TriggerEvent('esx_addonaccount:getSharedAccount', 'society_'..jobName, function(account)
-                if account then account.removeMoney(amount) end
-            end)
-            TriggerEvent('esx_society:getSociety', jobName, function(society)
-                if society then society.removeMoney(amount) end
-            end)
-        end
-    end
-
     -- Revive player
     function Framework.RevivePlayer(source)
         local reviveSystem = Config.ReviveSystem or 'auto'
