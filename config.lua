@@ -22,14 +22,26 @@ Config.SocietyAccount = 'ambulance' -- Society/job account name to receive payme
 -- Doctor Vehicle Settings
 Config.VehicleModel = 'ambulance' -- Vehicle model to spawn
 Config.VehiclePlate = 'DOCTOR' -- License plate for doctor vehicle
-Config.SpawnDistance = 75.0 -- Distance from player to spawn vehicle (in GTA units)
+Config.SpawnDistance = 75.0 -- Distance from player to spawn vehicle when no hospital is configured/available (in GTA units)
 Config.SpawnOffset = 5.0 -- Height offset for vehicle spawn to avoid spawning in ground
-Config.SpawnZThreshold = 8.0 -- Max vertical (Z) difference between player and chosen road node. Prevents the doctor spawning on a bridge above/below the player.
+Config.SpawnZThreshold = 8.0 -- Max vertical (Z) difference between player and chosen road node when falling back to nearby spawn. Prevents the doctor spawning on a bridge above/below the player.
+
+-- Hospital Spawn Settings
+Config.UseHospitalSpawn = true -- If true, ambulance spawns at the closest configured hospital and drives to the player. If false, falls back to spawning near the player.
+Config.HospitalSpawns = {
+    -- vec4(x, y, z, heading) — add as many as you like; the closest one to the player is used.
+    vec4(355.516479, -546.092285, 28.740601, 266.456696),    -- Pillbox Hill
+    vec4(-478.483521, -341.261536, 34.368530, 170.078735),   -- Mount Zonah
+    vec4(1811.459351, 3684.619873, 34.199951, 300.472443),   -- Sandy Shores
+    vec4(-258.989014, 6300.777832, 31.672485, 226.771667),   -- Paleto Bay
+}
 
 -- Doctor NPC Settings
 Config.DoctorPed = 's_m_m_doctor_01' -- Ped model for the doctor
-Config.DoctorSpeed = 20.0 -- Driving speed for doctor (in m/s)
-Config.DoctorDrivingStyle = 786603 -- Driving style flags (786603 = normal, cautious)
+Config.DoctorSpeed = 30.0 -- Driving speed for doctor (in m/s) -- bumped for emergency response
+Config.DoctorDrivingStyle = 786470 -- Driving style flags. 786470 = emergency: weaves around cars, ignores red lights, still stops for peds. Use 786603 for "normal cautious" if you'd rather have a polite ambulance.
+Config.DoctorAbility = 1.0 -- Driver skill (0.0 - 1.0). 1.0 = professional, takes corners well.
+Config.DoctorAggressiveness = 1.0 -- Driver aggressiveness (0.0 - 1.0). 1.0 = will push past traffic instead of waiting.
 Config.UseSiren = true -- Run lights and sirens while driving to the player (turns off when the doctor arrives)
 
 -- Proximity Settings

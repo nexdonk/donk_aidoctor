@@ -97,49 +97,68 @@ function SpawnDoctor(playerPos)
         Wait(10)
     end
 
-    local spawnRadius = Config.SpawnDistance
-    local zThreshold = Config.SpawnZThreshold or 8.0
-    local searchX = playerPos.x + math.random(-spawnRadius, spawnRadius)
-    local searchY = playerPos.y + math.random(-spawnRadius, spawnRadius)
-
     local spawnPos, spawnHeading
-    local fallbackPos, fallbackHeading
     local found = false
+    local spawnedFromHospital = false
 
-    for nth = 1, 25 do
-        local ok, nodePos, nodeHeading = GetNthClosestVehicleNodeWithHeading(
-            searchX, searchY, playerPos.z, nth, 1, 3.0, 0
-        )
-        if ok then
-            if not fallbackPos then
-                fallbackPos = nodePos
-                fallbackHeading = nodeHeading
-            end
-            if math.abs(nodePos.z - playerPos.z) <= zThreshold then
-                spawnPos = nodePos
-                spawnHeading = nodeHeading
-                found = true
-                DebugPrint(string.format('Found road node at same elevation (dz=%.2f) on attempt %d', nodePos.z - playerPos.z, nth))
-                break
+    if Config.UseHospitalSpawn and Config.HospitalSpawns and #Config.HospitalSpawns > 0 then
+        local closest, closestDist
+        for _, hosp in ipairs(Config.HospitalSpawns) do
+            local d = #(vector3(hosp.x, hosp.y, hosp.z) - playerPos)
+            if not closestDist or d < closestDist then
+                closestDist = d
+                closest = hosp
             end
         end
-    end
-
-    if not found and fallbackPos then
-        DebugPrint(string.format('No node within %.1fm Z of player; falling back to nearest (dz=%.2f)', zThreshold, fallbackPos.z - playerPos.z))
-        spawnPos = fallbackPos
-        spawnHeading = fallbackHeading
+        spawnPos = vector3(closest.x, closest.y, closest.z)
+        spawnHeading = closest.w
         found = true
+        spawnedFromHospital = true
+        DebugPrint(string.format('Dispatching from hospital at distance %.1fm from player', closestDist))
     end
 
     if not found then
-        DebugPrint('Could not find vehicle node, using random position')
-        spawnPos = vector3(
-            playerPos.x + math.random(-spawnRadius, spawnRadius),
-            playerPos.y + math.random(-spawnRadius, spawnRadius),
-            playerPos.z
-        )
-        spawnHeading = math.random(0, 359)
+        local spawnRadius = Config.SpawnDistance
+        local zThreshold = Config.SpawnZThreshold or 8.0
+        local searchX = playerPos.x + math.random(-spawnRadius, spawnRadius)
+        local searchY = playerPos.y + math.random(-spawnRadius, spawnRadius)
+        local fallbackPos, fallbackHeading
+
+        for nth = 1, 25 do
+            local ok, nodePos, nodeHeading = GetNthClosestVehicleNodeWithHeading(
+                searchX, searchY, playerPos.z, nth, 1, 3.0, 0
+            )
+            if ok then
+                if not fallbackPos then
+                    fallbackPos = nodePos
+                    fallbackHeading = nodeHeading
+                end
+                if math.abs(nodePos.z - playerPos.z) <= zThreshold then
+                    spawnPos = nodePos
+                    spawnHeading = nodeHeading
+                    found = true
+                    DebugPrint(string.format('Found road node at same elevation (dz=%.2f) on attempt %d', nodePos.z - playerPos.z, nth))
+                    break
+                end
+            end
+        end
+
+        if not found and fallbackPos then
+            DebugPrint(string.format('No node within %.1fm Z of player; falling back to nearest (dz=%.2f)', zThreshold, fallbackPos.z - playerPos.z))
+            spawnPos = fallbackPos
+            spawnHeading = fallbackHeading
+            found = true
+        end
+
+        if not found then
+            DebugPrint('Could not find vehicle node, using random position')
+            spawnPos = vector3(
+                playerPos.x + math.random(-spawnRadius, spawnRadius),
+                playerPos.y + math.random(-spawnRadius, spawnRadius),
+                playerPos.z
+            )
+            spawnHeading = math.random(0, 359)
+        end
     end
 
     if DoctorVehicle and DoesEntityExist(DoctorVehicle) then
@@ -149,7 +168,8 @@ function SpawnDoctor(playerPos)
         DeleteEntity(DoctorPed)
     end
 
-    DoctorVehicle = CreateVehicle(vehicleHash, spawnPos.x, spawnPos.y, spawnPos.z + Config.SpawnOffset, spawnHeading, true, false)
+    local zOffset = spawnedFromHospital and 0.0 or Config.SpawnOffset
+    DoctorVehicle = CreateVehicle(vehicleHash, spawnPos.x, spawnPos.y, spawnPos.z + zOffset, spawnHeading, true, false)
     ClearAreaOfVehicles(GetEntityCoords(DoctorVehicle), 5.0, false, false, false, false, false)
     SetVehicleOnGroundProperly(DoctorVehicle)
     SetVehicleNumberPlateText(DoctorVehicle, Config.VehiclePlate)
@@ -168,6 +188,8 @@ function SpawnDoctor(playerPos)
     SetEntityAsMissionEntity(DoctorPed, true, true)
     SetBlockingOfNonTemporaryEvents(DoctorPed, true)
     SetPedFleeAttributes(DoctorPed, 0, false)
+    SetDriverAbility(DoctorPed, Config.DoctorAbility or 1.0)
+    SetDriverAggressiveness(DoctorPed, Config.DoctorAggressiveness or 1.0)
 
     DebugPrint('Doctor NPC created')
 
@@ -189,20 +211,34 @@ function SpawnDoctor(playerPos)
 
     Wait(2000)
 
-    TaskVehicleDriveToCoord(
-        DoctorPed,
-        DoctorVehicle,
-        playerPos.x,
-        playerPos.y,
-        playerPos.z,
-        Config.DoctorSpeed,
-        0,
-        GetEntityModel(DoctorVehicle),
-        Config.DoctorDrivingStyle,
-        2.0
-    )
-
-    DebugPrint('Doctor driving to player location')
+    local distToPlayer = #(spawnPos - playerPos)
+    if spawnedFromHospital or distToPlayer > 200.0 then
+        TaskVehicleDriveToCoordLongrange(
+            DoctorPed,
+            DoctorVehicle,
+            playerPos.x,
+            playerPos.y,
+            playerPos.z,
+            Config.DoctorSpeed,
+            Config.DoctorDrivingStyle,
+            Config.ApproachDistance * 0.5
+        )
+        DebugPrint(string.format('Doctor long-range driving to player (%.0fm away)', distToPlayer))
+    else
+        TaskVehicleDriveToCoord(
+            DoctorPed,
+            DoctorVehicle,
+            playerPos.x,
+            playerPos.y,
+            playerPos.z,
+            Config.DoctorSpeed,
+            0,
+            GetEntityModel(DoctorVehicle),
+            Config.DoctorDrivingStyle,
+            2.0
+        )
+        DebugPrint('Doctor driving to player location')
+    end
 
     Active = true
     ProcessingCall = false
