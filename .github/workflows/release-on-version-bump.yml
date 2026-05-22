@@ -1,0 +1,71 @@
+name: Release on version bump
+
+on:
+  push:
+    branches: [main, master]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Detect version bump & build changelog
+        id: detect
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: node .github/scripts/detect-version-bump.mjs
+
+      - name: Create GitHub release
+        if: steps.detect.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.detect.outputs.tag }}" \
+            --title "${{ steps.detect.outputs.tag }}" \
+            --notes-file release-notes.md
+          git fetch --tags --force
+
+      - name: Post to Discord
+        if: steps.detect.outputs.changed == 'true'
+        env:
+          DISCORD_BOT_TOKEN:     ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_ID:    ${{ secrets.DISCORD_CHANNEL_ID }}
+          DISCORD_PING_ROLE_IDS: ${{ vars.DISCORD_PING_ROLE_IDS }}
+
+          BRAND_NAME:   ${{ vars.BRAND_NAME }}
+          EMBED_COLOR:  ${{ vars.EMBED_COLOR }}
+
+          STORE_URL_TEMPLATE: ${{ vars.STORE_URL_TEMPLATE }}
+          DOCS_URL_TEMPLATE:  ${{ vars.DOCS_URL_TEMPLATE }}
+          CFX_URL_TEMPLATE:   ${{ vars.CFX_URL_TEMPLATE }}
+
+          STORE_URL_OVERRIDE: ${{ vars.STORE_URL }}
+          DOCS_URL_OVERRIDE:  ${{ vars.DOCS_URL }}
+          CFX_URL_OVERRIDE:   ${{ vars.CFX_URL }}
+
+          BANNER_OVERRIDE_URL: ${{ vars.BANNER_OVERRIDE_URL }}
+
+          REPO_FULL:           ${{ github.repository }}
+          REPO_NAME:           ${{ github.event.repository.name }}
+          REPO_OWNER:          ${{ github.repository_owner }}
+          REPO_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+
+          RELEASE_TAG:          ${{ steps.detect.outputs.tag }}
+          RELEASE_NAME:         ${{ steps.detect.outputs.tag }}
+          RELEASE_URL:          ${{ format('https://github.com/{0}/releases/tag/{1}', github.repository, steps.detect.outputs.tag) }}
+          RELEASE_PUBLISHED_AT: ${{ steps.detect.outputs.published_at }}
+        run: |
+          export RELEASE_BODY="$(cat release-notes.md)"
+          node .github/scripts/build-discord-payload.mjs
