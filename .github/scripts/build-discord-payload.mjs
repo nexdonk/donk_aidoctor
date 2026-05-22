@@ -154,11 +154,46 @@ const payload = {
   components: [{ type: 17, accent_color: COLOR_INT, components: container }],
 };
 
-const roleIds = (env.DISCORD_PING_ROLE_IDS || '')
+const rawPingIds = (env.DISCORD_PING_ROLE_IDS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
-if (roleIds.length) {
-  payload.content = roleIds.map(r => `<@&${r}>`).join(' ');
-  payload.allowed_mentions = { parse: [], roles: roleIds };
+
+if (rawPingIds.length) {
+  // The @everyone role's ID is the same as the guild ID; mentioning it via
+  // `<@&guildId>` makes Discord prefix the role name with an extra `@`,
+  // rendering as `@@everyone`. Fetch the channel's guild ID once so we can
+  // detect that case and emit the literal `@everyone` token instead.
+  let guildId = null;
+  try {
+    const cr = await fetch(`https://discord.com/api/v10/channels/${CHANNEL_ID}`, {
+      headers: { 'Authorization': `Bot ${TOKEN}` },
+    });
+    if (cr.ok) guildId = (await cr.json()).guild_id || null;
+  } catch { /* fall back to plain role mentions */ }
+
+  const parse = new Set();
+  const roleMentionIds = [];
+  const tokens = [];
+
+  for (const raw of rawPingIds) {
+    const v = raw.toLowerCase().replace(/^@/, '');
+    if (v === 'everyone' || (guildId && raw === guildId)) {
+      tokens.push('@everyone');
+      parse.add('everyone');
+    } else if (v === 'here') {
+      tokens.push('@here');
+      parse.add('everyone'); // @here is gated by the `everyone` parse flag
+    } else {
+      tokens.push(`<@&${raw}>`);
+      roleMentionIds.push(raw);
+    }
+  }
+
+  // Components V2 forbids the legacy `content` field — the ping has to live
+  // inside a Text Display component. Prepend one above the Container so the
+  // mention renders just above the embed.
+  payload.components.unshift({ type: 10, content: tokens.join(' ') });
+
+  payload.allowed_mentions = { parse: [...parse], roles: roleMentionIds };
 }
 
 const res = await fetch(`https://discord.com/api/v10/channels/${CHANNEL_ID}/messages`, {
