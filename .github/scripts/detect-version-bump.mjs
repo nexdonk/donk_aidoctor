@@ -11,6 +11,7 @@
 
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+import { getFxFileMatcher } from './fxmanifest-files.mjs';
 
 function setOutput(name, value) {
   const file = process.env.GITHUB_OUTPUT;
@@ -78,11 +79,25 @@ const sortedTags = execSync('git tag --sort=-v:refname', { encoding: 'utf8' })
   .split('\n').map(t => t.trim()).filter(Boolean);
 const prevTag = sortedTags[0] || null;
 
+const fxMatch = getFxFileMatcher();
+
+// Pull each commit's subject AND the files it touched, so commits that only
+// affect repo plumbing (.github, README, etc.) can be dropped from release notes.
+const COMMIT_SEP = '---NEX_COMMIT---';
 let commits = [];
 try {
   const range = prevTag ? `${prevTag}..HEAD` : 'HEAD';
-  const log = execSync(`git log ${range} --pretty=format:%s --no-merges`, { encoding: 'utf8' });
-  commits = log.split('\n').map(c => c.trim()).filter(Boolean);
+  const log = execSync(
+    `git log ${range} --no-merges --name-only --pretty=format:${COMMIT_SEP}%n%s`,
+    { encoding: 'utf8' }
+  );
+  for (const chunk of log.split(COMMIT_SEP + '\n')) {
+    const lines = chunk.split('\n');
+    const subject = (lines.shift() || '').trim();
+    if (!subject) continue;
+    const files = lines.map(l => l.trim()).filter(Boolean);
+    commits.push({ subject, files });
+  }
 } catch (e) {
   console.error('git log failed:', e.message);
 }
@@ -117,8 +132,12 @@ function categorize(raw) {
 }
 
 const buckets = { added: [], changed: [], fixed: [] };
-for (const c of commits) {
-  const r = categorize(c);
+let droppedCommits = 0;
+for (const { subject, files } of commits) {
+  // Drop commits whose touched files are all outside the fxmanifest scope —
+  // they don't affect the running script, so they don't belong in the changelog.
+  if (files.length && !files.some(fxMatch)) { droppedCommits++; continue; }
+  const r = categorize(subject);
   if (!r) continue;
   const t = r.text.charAt(0).toUpperCase() + r.text.slice(1);
   buckets[r.cat].push(t);
@@ -128,7 +147,7 @@ let changedFiles = [];
 try {
   const range = prevTag ? `${prevTag}..HEAD` : 'HEAD';
   const raw = execSync(`git diff --name-only ${range}`, { encoding: 'utf8' });
-  changedFiles = raw.split('\n').map(f => f.trim()).filter(Boolean);
+  changedFiles = raw.split('\n').map(f => f.trim()).filter(Boolean).filter(fxMatch);
 } catch {}
 
 const collapsed = new Set();
@@ -166,5 +185,5 @@ setOutput('prev_tag', prevTag || '');
 setOutput('published_at', new Date().toISOString());
 
 console.log(`OK  ${prevVersion} -> ${newVersion}  (tag ${tag})`);
-console.log(`Commits considered: ${commits.length}`);
+console.log(`Commits considered: ${commits.length} (${droppedCommits} skipped — no fxmanifest files touched)`);
 console.log(`  Added: ${buckets.added.length}, Changed: ${buckets.changed.length}, Fixed: ${buckets.fixed.length}`);

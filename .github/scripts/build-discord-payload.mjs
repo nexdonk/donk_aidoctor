@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { getFxFileMatcher } from './fxmanifest-files.mjs';
 
 const env = process.env;
 const req = (n) => { if (!env[n]) throw new Error(`Missing env: ${n}`); return env[n]; };
@@ -76,7 +77,8 @@ function autoChangedFiles() {
   let raw;
   try { raw = execSync(`git diff --name-only ${prev}..${TAG}`, { encoding: 'utf8' }); }
   catch { return 'All files - complete reinstall required'; }
-  const files = raw.split('\n').map(f => f.trim()).filter(Boolean);
+  const fxMatch = getFxFileMatcher();
+  const files = raw.split('\n').map(f => f.trim()).filter(Boolean).filter(fxMatch);
   if (files.length === 0) return null;
   const collapsed = new Set();
   for (const f of files) {
