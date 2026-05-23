@@ -160,10 +160,9 @@ const rawPingIds = (env.DISCORD_PING_ROLE_IDS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
 
 if (rawPingIds.length) {
-  // The @everyone role's ID is the same as the guild ID; mentioning it via
-  // `<@&guildId>` makes Discord prefix the role name with an extra `@`,
-  // rendering as `@@everyone`. Fetch the channel's guild ID once so we can
-  // detect that case and emit the literal `@everyone` token instead.
+  // Hard rule: never ping @everyone or @here. People complained, so we strip
+  // those tokens here. We also fetch the channel's guild ID so a role ID that
+  // happens to equal the guild ID (which IS the @everyone role) is dropped too.
   let guildId = null;
   try {
     const cr = await fetch(`https://discord.com/api/v10/channels/${CHANNEL_ID}`, {
@@ -172,30 +171,28 @@ if (rawPingIds.length) {
     if (cr.ok) guildId = (await cr.json()).guild_id || null;
   } catch { /* fall back to plain role mentions */ }
 
-  const parse = new Set();
   const roleMentionIds = [];
   const tokens = [];
 
   for (const raw of rawPingIds) {
     const v = raw.toLowerCase().replace(/^@/, '');
-    if (v === 'everyone' || (guildId && raw === guildId)) {
-      tokens.push('@everyone');
-      parse.add('everyone');
-    } else if (v === 'here') {
-      tokens.push('@here');
-      parse.add('everyone'); // @here is gated by the `everyone` parse flag
-    } else {
-      tokens.push(`<@&${raw}>`);
-      roleMentionIds.push(raw);
+    if (v === 'everyone' || v === 'here' || (guildId && raw === guildId)) {
+      console.log(`Skipping ping token "${raw}" — @everyone/@here pings are disabled.`);
+      continue;
     }
+    tokens.push(`<@&${raw}>`);
+    roleMentionIds.push(raw);
   }
 
-  // Components V2 forbids the legacy `content` field — the ping has to live
-  // inside a Text Display component. Prepend one above the Container so the
-  // mention renders just above the embed.
-  payload.components.unshift({ type: 10, content: tokens.join(' ') });
-
-  payload.allowed_mentions = { parse: [...parse], roles: roleMentionIds };
+  if (tokens.length) {
+    // Components V2 forbids the legacy `content` field — the ping has to live
+    // inside a Text Display component. Prepend one above the Container so the
+    // mention renders just above the embed.
+    payload.components.unshift({ type: 10, content: tokens.join(' ') });
+    // `parse: []` explicitly forbids @everyone/@here even if a future bug puts
+    // those strings into the content; `roles` whitelists exactly the IDs above.
+    payload.allowed_mentions = { parse: [], roles: roleMentionIds };
+  }
 }
 
 const res = await fetch(`https://discord.com/api/v10/channels/${CHANNEL_ID}/messages`, {
